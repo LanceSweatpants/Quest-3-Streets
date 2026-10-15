@@ -1,0 +1,17 @@
+# Street MR tuning (no rebuild needed: Install-StreetXR.ps1 copies it to files/user)
+# upm = game units per metre (NBA Street: feet), tablesize = metres the court's longest side takes
+# on the table (Strikers ~1.5), charscale = players + ball on the table vs. their real size,
+# inset = metres you stand inside the court's camera-side edge in Tabletop - Stadium (VR),
+# courtradius = field pieces must be centred this close to the origin (the court, not the plaza),
+# fieldmax = longest side a field piece may have (metres), gripgrab 0 = grips stay game buttons
+# (hold the left stick in to grab the table; add the right grip for two hands).
+upm 3.2808
+tablesize 1.5
+charscale 1.5
+inset 3
+courtradius 8
+fieldmax 45
+gripgrab 0
+shadowfix 0
+tablemaxh 4
+vrsky 8365782
