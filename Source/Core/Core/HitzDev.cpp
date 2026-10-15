@@ -667,6 +667,61 @@ void ApplyInput(int pad_num, GCPadStatus* status)
     status->button &= ~PAD_TRIGGER_Z;
 #endif
 
+  // StreetMR r35n (Lance: "make both GRIP buttons activate gamebreaker"): the game's Gamebreaker
+  // is two turbos held, then shoot (ludo.guide NBA Street Vol. 2: "Press and hold any 2 turbos,
+  // then press the shoot/dunk button"). The grips are the GameCube's X (right) and Z (left); both
+  // squeezed = L + R turbo held, and B pressed 100 ms in for 150 ms. One grip alone stays X / Z,
+  // and a grip holding the big screen was cleared above, so grabbing never fires it. Before the
+  // B rule below, which keeps B as shoot on offense.
+  if (SConfig::GetInstance().GetGameID() == "GNZE69")
+  {
+    static Clock::time_point s_both_grips_since{};
+    if ((status->button & PAD_BUTTON_X) && (status->button & PAD_TRIGGER_Z))
+    {
+      const auto now = Clock::now();
+      if (s_both_grips_since == Clock::time_point{})
+        s_both_grips_since = now;
+      const auto held_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - s_both_grips_since).count();
+      status->button &= ~(PAD_BUTTON_X | PAD_TRIGGER_Z);
+      status->button |= PAD_TRIGGER_L | PAD_TRIGGER_R;
+      status->triggerLeft = 0xFF;
+      status->triggerRight = 0xFF;
+      if (held_ms >= 100 && held_ms < 250)
+      {
+        status->button |= PAD_BUTTON_B;
+        status->analogB = 0xFF;
+      }
+    }
+    else
+    {
+      s_both_grips_since = {};
+    }
+  }
+
+#ifdef ENABLE_VR
+  // StreetMR r35n (Lance: "i be moving that bitch with force like 4 times before it registers",
+  // "at the menu that is"): the game's menus only move on a hard, near-full stick push. Outside a
+  // match, a left-stick push past ~a third becomes the D-pad direction (menus take it at once) and
+  // the stick is centred for that push, so one push can't move twice. In a match the stick is
+  // untouched.
+  if (SConfig::GetInstance().GetGameID() == "GNZE69" && !HitzWorld::InMatchAnyThread())
+  {
+    constexpr int MENU_PUSH = 40;  // of the GameCube stick's ~87 from centre
+    const int dx = static_cast<int>(status->stickX) - 128;
+    const int dy = static_cast<int>(status->stickY) - 128;
+    if (std::max(std::abs(dx), std::abs(dy)) > MENU_PUSH)
+    {
+      if (std::abs(dx) >= std::abs(dy))
+        status->button |= dx < 0 ? PAD_BUTTON_LEFT : PAD_BUTTON_RIGHT;
+      else
+        status->button |= dy > 0 ? PAD_BUTTON_UP : PAD_BUTTON_DOWN;
+      status->stickX = 128;
+      status->stickY = 128;
+    }
+  }
+#endif
+
   // BaseballMR: base-throw buttons (Lance): while your fielder holds the ball on a live play,
   // A = home, B = 1st, Y = 2nd, X = 3rd - sent to the game as stick direction + A (its own throw:
   // down = home, right = 1st, up = 2nd, left = 3rd). Batting, pitching (A+down = change-up, B =

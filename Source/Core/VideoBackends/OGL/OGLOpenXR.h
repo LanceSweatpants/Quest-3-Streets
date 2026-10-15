@@ -9,10 +9,16 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
 #include <vector>
+
+#if defined(ANDROID)
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#endif
 
 #include <openxr/openxr.h>
 
@@ -65,9 +71,16 @@ public:
   OGLOpenXR(const OGLOpenXR&) = delete;
   OGLOpenXR& operator=(const OGLOpenXR&) = delete;
 
-  // GL frame calls must stay on the thread owning the GL context; keep the legacy
-  // inline Wait/Begin/EndFrame flow instead of the XR pacing thread.
-  bool SupportsDetachedFrameLoop() const override { return false; }
+  // StreetMR r35m: GLES may use the XR pacing thread. Unlike XR_KHR_opengl_enable, the GLES
+  // binding (XR_KHR_opengl_es_enable) doesn't require the app's context to be current for
+  // xrWaitFrame / xrBeginFrame / xrEndFrame, so they run on the pacing thread at the display rate
+  // while every GL call stays on the render thread: swapchain image acquire / blit / release (as
+  // before) and the VR 360 backdrop (BackdropNeedsRenderThread). [VR] UseXRPacingThread = False
+  // brings back the old inline flow (one XR frame per game frame: 60 on 72 Hz, Prd ~50 ms).
+  bool SupportsDetachedFrameLoop() const override { return true; }
+  bool BackdropNeedsRenderThread() const override { return true; }
+  std::unique_lock<std::mutex> LockImageRelease() override;
+  void WaitForReleasedImages(bool locked) override;
 
   // Full initialization: creates XrInstance + system, GL-bound XrSession,
   // reference space, and per-eye swapchains.
@@ -93,7 +106,18 @@ public:
   uint32_t GetEyeHeight() const override { return m_eye_swapchains[0].height; }
 
   // Flat mono panel path reuses eye swapchain #0; the base class handles acquire/release/submit.
-  XrSwapchain GetFlatSwapchain() const override { return m_eye_swapchains[0].swapchain; }
+  // StreetMR r35n: with the pacing thread the big screen alternates between the two eye
+  // swapchains (both idle in flat mode), each release fenced; the pacing thread shows whichever
+  // holds a finished image (PickReadyFlatSwapchain) instead of waiting for the GPU. Inline flow:
+  // eye 0 only, as before.
+  XrSwapchain GetFlatSwapchain() const override
+  {
+    return m_eye_swapchains[m_flat_last].swapchain;
+  }
+  AbstractFramebuffer* AcquireFlatFramebuffer() override;
+  void ReleaseFlatTexture() override;
+  XrSwapchain PickReadyFlatSwapchain(XrSwapchain requested) override;
+  std::string TakeFlatPickStats() override;
 
   // StreetMR VR 360: the current court's pictures (files/user/Load/StreetVR360/<court>.png = the
   // whole court, <court>_sky.png = its calm sky; six square faces side by side in GL order
@@ -175,6 +199,33 @@ private:
   u32 m_lights_fill_image = 0;
   u32 m_lights_fill_rows = 0;  // rows filled so far, over all six faces
   void PollBackdropLights();
+
+  // r35m: the newest image release's EGL fence, waited for by the pacing thread before
+  // xrEndFrame (see WaitForReleasedImages). Guarded by m_release_mutex.
+  std::mutex m_release_mutex;
+  void PutDownReleaseFence();
+  // r35n: the big screen's two swapchains (eye 0 / eye 1). m_flat_current: acquired now;
+  // m_flat_last: released last. Per swapchain (m_release_mutex): released at least once since
+  // flat mode started, a release counter, and the fence of its newest image (none = finished).
+  uint32_t m_flat_current = 0;
+  uint32_t m_flat_last = 0;
+  std::array<bool, 2> m_flat_released{false, false};
+  std::array<u64, 2> m_flat_serial{0, 0};
+  u64 m_flat_counter = 0;
+  // r35n: PickReadyFlatSwapchain outcomes since the last TakeFlatPickStats (m_release_mutex).
+  u32 m_pick_newest = 0, m_pick_older = 0, m_pick_waited = 0, m_pick_late = 0;
+  bool FlatImageFinishedLocked(uint32_t index, u64 wait_ns);
+#if defined(ANDROID)
+  bool LoadEglFenceFunctions();
+  bool m_egl_fence_tried = false;
+  PFNEGLCREATESYNCKHRPROC m_egl_create_sync = nullptr;
+  PFNEGLDESTROYSYNCKHRPROC m_egl_destroy_sync = nullptr;
+  PFNEGLCLIENTWAITSYNCKHRPROC m_egl_client_wait_sync = nullptr;
+  EGLSyncKHR m_release_sync = EGL_NO_SYNC_KHR;
+  EGLDisplay m_release_sync_display = EGL_NO_DISPLAY;
+  std::array<EGLSyncKHR, 2> m_flat_sync{EGL_NO_SYNC_KHR, EGL_NO_SYNC_KHR};
+  EGLDisplay m_flat_sync_display = EGL_NO_DISPLAY;
+#endif
 
   // Non-owning; the context is owned by OGLGfx and outlives this object.
   GLContext* m_context = nullptr;

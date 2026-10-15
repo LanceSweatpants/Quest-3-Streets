@@ -513,6 +513,21 @@ bool OGLOpenXR::CreateSwapchains()
 void OGLOpenXR::DestroySwapchains()
 {
   DestroyBackdrops();  // StreetMR VR 360
+#if defined(ANDROID)
+  {
+    std::lock_guard<std::mutex> lock(m_release_mutex);
+    if (m_release_sync != EGL_NO_SYNC_KHR && m_egl_destroy_sync)
+      m_egl_destroy_sync(m_release_sync_display, m_release_sync);
+    m_release_sync = EGL_NO_SYNC_KHR;
+    for (EGLSyncKHR& sync : m_flat_sync)
+    {
+      if (sync != EGL_NO_SYNC_KHR && m_egl_destroy_sync)
+        m_egl_destroy_sync(m_flat_sync_display, sync);
+      sync = EGL_NO_SYNC_KHR;
+    }
+    m_flat_released = {false, false};
+  }
+#endif
 
   for (uint32_t eye = 0; eye < 2; ++eye)
   {
@@ -592,6 +607,16 @@ void OGLOpenXR::ReleaseEyeTexture(uint32_t eye_index)
   if (!m_image_acquired[eye_index])
     return;
 
+  // r35m: with the pacing thread on, no release between its fence wait and its xrEndFrame.
+  std::unique_lock<std::mutex> release_lock;
+  if (VR::g_openxr && VR::g_openxr->IsFrameThreadActive())
+  {
+    release_lock = std::unique_lock<std::mutex>(m_release_mutex);
+    PutDownReleaseFence();
+    // r35n: this swapchain's newest image is now a stereo eye, not a big-screen frame.
+    m_flat_released[eye_index] = false;
+  }
+
   // Per XR_KHR_opengl_enable the runtime is responsible for GL synchronization at
   // release time, but some runtimes' GL paths have historically missed pending work;
   // one flush per eye per frame is cheap insurance.
@@ -607,6 +632,222 @@ void OGLOpenXR::ReleaseEyeTexture(uint32_t eye_index)
   }
   m_image_acquired[eye_index] = false;
 }
+
+// r35n: the big screen with the pacing thread alternates between the two eye swapchains (both
+// unused in flat mode); see PickReadyFlatSwapchain.
+AbstractFramebuffer* OGLOpenXR::AcquireFlatFramebuffer()
+{
+  if (!VR::g_openxr || !VR::g_openxr->IsFrameThreadActive())
+  {
+    m_flat_current = 0;
+    return AcquireEyeFramebuffer(0);
+  }
+  m_flat_current = m_flat_last ^ 1;
+  return AcquireEyeFramebuffer(m_flat_current);
+}
+
+void OGLOpenXR::ReleaseFlatTexture()
+{
+  const uint32_t i = m_flat_current;
+  if (!m_image_acquired[i])
+    return;
+  if (!VR::g_openxr || !VR::g_openxr->IsFrameThreadActive())
+  {
+    ReleaseEyeTexture(i);
+    m_flat_last = i;
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(m_release_mutex);
+#if defined(ANDROID)
+  // A fence after this image's blit (and everything before it): the pacing thread shows the image
+  // only once the fence has passed.
+  if (LoadEglFenceFunctions())
+  {
+    const EGLDisplay display = eglGetCurrentDisplay();
+    const EGLSyncKHR sync = display != EGL_NO_DISPLAY ?
+                                m_egl_create_sync(display, EGL_SYNC_FENCE_KHR, nullptr) :
+                                EGL_NO_SYNC_KHR;
+    if (m_flat_sync[i] != EGL_NO_SYNC_KHR)
+      m_egl_destroy_sync(m_flat_sync_display, m_flat_sync[i]);
+    m_flat_sync[i] = sync;
+    if (sync != EGL_NO_SYNC_KHR)
+      m_flat_sync_display = display;
+  }
+#endif
+  glFlush();
+  XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+  const XrResult result = xrReleaseSwapchainImage(m_eye_swapchains[i].swapchain, &release_info);
+  if (XR_FAILED(result))
+  {
+    WARN_LOG_FMT(VIDEO, "OpenXR: xrReleaseSwapchainImage failed for flat image {} ({}).", i,
+                 static_cast<int>(result));
+  }
+  m_image_acquired[i] = false;
+  m_flat_released[i] = true;
+  m_flat_serial[i] = ++m_flat_counter;
+  m_flat_last = i;
+}
+
+// m_release_mutex held. True once the GPU has finished swapchain `index`'s newest image (no fence
+// = finished), waiting at most `wait_ns`.
+bool OGLOpenXR::FlatImageFinishedLocked(uint32_t index, u64 wait_ns)
+{
+#if defined(ANDROID)
+  if (m_flat_sync[index] == EGL_NO_SYNC_KHR)
+    return true;
+  const EGLint result = m_egl_client_wait_sync(m_flat_sync_display, m_flat_sync[index], 0,
+                                               static_cast<EGLTimeKHR>(wait_ns));
+  if (result == EGL_TIMEOUT_EXPIRED_KHR)
+    return false;
+  // Signalled (or a broken fence: don't let it block the screen forever).
+  m_egl_destroy_sync(m_flat_sync_display, m_flat_sync[index]);
+  m_flat_sync[index] = EGL_NO_SYNC_KHR;
+#endif
+  return true;
+}
+
+// Pacing thread, m_release_mutex held through its xrEndFrame. 1.2d/1.2e waited here for the GPU
+// to finish the newest image; in MR (lower GPU clock) that wait made the pacing thread late and
+// the render thread skip game frames (only 27-47 of 60 shown a second). Now: the newest image if
+// it's finished, else the previous one (from the other swapchain, one game frame older) - never a
+// half-drawn image, no wait. When neither is done yet (the GPU two frames behind), wait for the
+// OLDER one - the GPU finishes in order, so it's done first - and show it (1.2g showed the newest
+// after 4 ms whatever its state: Lance's "glimpse of the flickering/see through effect" in VR).
+XrSwapchain OGLOpenXR::PickReadyFlatSwapchain(XrSwapchain requested)
+{
+  if (requested != m_eye_swapchains[0].swapchain && requested != m_eye_swapchains[1].swapchain)
+    return requested;
+  const uint32_t newest = m_flat_serial[0] >= m_flat_serial[1] ? 0 : 1;
+  const uint32_t older = newest ^ 1;
+  if (m_flat_released[newest] && FlatImageFinishedLocked(newest, 0))
+  {
+    m_pick_newest++;
+    return m_eye_swapchains[newest].swapchain;
+  }
+  if (m_flat_released[older])
+  {
+    if (FlatImageFinishedLocked(older, 0))
+      m_pick_older++;
+    else if (FlatImageFinishedLocked(older, 12'000'000))
+      m_pick_waited++;
+    else
+      m_pick_late++;
+    return m_eye_swapchains[older].swapchain;
+  }
+  // Only one image so far (flat mode just started): it has to be that one, once it's done.
+  if (m_flat_released[newest])
+  {
+    if (!FlatImageFinishedLocked(newest, 12'000'000))
+      m_pick_late++;
+    return m_eye_swapchains[newest].swapchain;
+  }
+  return requested;
+}
+
+std::string OGLOpenXR::TakeFlatPickStats()
+{
+  std::lock_guard<std::mutex> lock(m_release_mutex);
+  if (m_pick_newest + m_pick_older + m_pick_waited + m_pick_late == 0)
+    return {};
+  std::string text = fmt::format(" pick={}/{}/{}/{}", m_pick_newest, m_pick_older, m_pick_waited,
+                                 m_pick_late);
+  m_pick_newest = m_pick_older = m_pick_waited = m_pick_late = 0;
+  return text;
+}
+
+// r35m: render thread, inside m_release_mutex, just before an image release: a fence after
+// everything drawn so far (the blit into that image included). One slot: the GPU finishes in
+// order, so the newest fence covers the earlier ones; a fence still in the slot (nobody took it
+// yet) is simply replaced.
+void OGLOpenXR::PutDownReleaseFence()
+{
+#if defined(ANDROID)
+  if (!LoadEglFenceFunctions())
+    return;
+  const EGLDisplay display = eglGetCurrentDisplay();
+  if (display == EGL_NO_DISPLAY)
+    return;
+  const EGLSyncKHR sync = m_egl_create_sync(display, EGL_SYNC_FENCE_KHR, nullptr);
+  if (sync == EGL_NO_SYNC_KHR)
+    return;
+  if (m_release_sync != EGL_NO_SYNC_KHR)
+    m_egl_destroy_sync(m_release_sync_display, m_release_sync);
+  m_release_sync = sync;
+  m_release_sync_display = display;
+#endif
+}
+
+std::unique_lock<std::mutex> OGLOpenXR::LockImageRelease()
+{
+  return std::unique_lock<std::mutex>(m_release_mutex);
+}
+
+// Pacing thread. 1.2d waited here with m_release_mutex held, so the render thread's next image
+// release (and the emulation behind it) stalled for as long as the GPU took - in MR, with its
+// lower GPU clock, that showed as repeated frames and 94-98% speed. Now the fence is taken out of
+// the slot under the lock and waited for without it (EGL fences can be waited on from a thread
+// without the GL context; the taker owns and destroys it). `locked`: the caller already holds
+// m_release_mutex for its xrEndFrame - only a fence put down in the last moment is left, and it
+// gets a short wait.
+void OGLOpenXR::WaitForReleasedImages(bool locked)
+{
+#if defined(ANDROID)
+  const EGLTimeKHR timeout_ns = locked ? 3'000'000 : 12'000'000;
+  for (int i = 0; i < 4; ++i)
+  {
+    EGLSyncKHR sync = EGL_NO_SYNC_KHR;
+    EGLDisplay display = EGL_NO_DISPLAY;
+    {
+      std::unique_lock<std::mutex> lock(m_release_mutex, std::defer_lock);
+      if (!locked)
+        lock.lock();
+      sync = m_release_sync;
+      display = m_release_sync_display;
+      m_release_sync = EGL_NO_SYNC_KHR;
+    }
+    if (sync == EGL_NO_SYNC_KHR)
+      return;
+    const EGLint result = m_egl_client_wait_sync(display, sync, 0, timeout_ns);
+    m_egl_destroy_sync(display, sync);
+    if (result == EGL_TIMEOUT_EXPIRED_KHR)
+    {
+      static u32 s_timeouts = 0;
+      if (s_timeouts++ < 20)
+      {
+        WARN_LOG_FMT(VIDEO, "OpenXR GL: released image still drawing after {} ms",
+                     timeout_ns / 1'000'000);
+      }
+      return;
+    }
+    if (locked)
+      return;
+  }
+#endif
+}
+
+#if defined(ANDROID)
+bool OGLOpenXR::LoadEglFenceFunctions()
+{
+  if (m_egl_fence_tried)
+    return m_egl_create_sync != nullptr;
+  m_egl_fence_tried = true;
+  m_egl_create_sync =
+      reinterpret_cast<PFNEGLCREATESYNCKHRPROC>(eglGetProcAddress("eglCreateSyncKHR"));
+  m_egl_destroy_sync =
+      reinterpret_cast<PFNEGLDESTROYSYNCKHRPROC>(eglGetProcAddress("eglDestroySyncKHR"));
+  m_egl_client_wait_sync =
+      reinterpret_cast<PFNEGLCLIENTWAITSYNCKHRPROC>(eglGetProcAddress("eglClientWaitSyncKHR"));
+  if (!m_egl_create_sync || !m_egl_destroy_sync || !m_egl_client_wait_sync)
+  {
+    m_egl_create_sync = nullptr;
+    WARN_LOG_FMT(VIDEO, "OpenXR GL: no EGL fence sync; released images aren't waited for.");
+    return false;
+  }
+  INFO_LOG_FMT(VIDEO, "OpenXR GL: EGL fences guard released images (pacing thread).");
+  return true;
+}
+#endif
 
 bool OGLOpenXR::SubmitFrame()
 {
@@ -636,6 +877,15 @@ bool OGLOpenXR::SubmitFrame()
   m_projection_layer.viewCount = 2;
   m_projection_layer.views = m_projection_views.data();
   m_projection_layer.layerFlags = VR::g_openxr->GetProjectionLayerExtraFlags();
+
+  // StreetMR r35m: with the pacing thread on (GL too now), the eye images were released in the
+  // blit just before this; hand the views to the pacing thread, which ends the XR frames.
+  if (VR::g_openxr->IsFrameThreadActive())
+  {
+    VR::g_openxr->PublishFrame(m_projection_views, m_projection_layer.layerFlags,
+                               VR::g_openxr->GetContentGeneration());
+    return true;
+  }
 
   const std::vector<XrCompositionLayerBaseHeader*> layers = {
       reinterpret_cast<XrCompositionLayerBaseHeader*>(&m_projection_layer)};

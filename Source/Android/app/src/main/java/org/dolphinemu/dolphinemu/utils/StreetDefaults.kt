@@ -47,6 +47,13 @@ object StreetDefaults {
             // r35l (Lance: max fps): no HD texture pack ships, so looking one up for every texture
             // the game loads is only CPU time. Also fixes headsets that got the earlier GFX.ini.
             setIniValue(File(userDir, "Config/GFX.ini"), "Settings", "HiresTextures", "False")
+            // r35m: the big screen's image is the eye swapchain (1680x1760 at 1.0) with the game
+            // picture (1280 wide at 2x) stretched over it every frame. 0.8 = 1344x1408: still
+            // wider than the picture, 36% fewer pixels to fill and for the headset to sample.
+            setIniValue(File(userDir, "Config/GFX.ini"), "VR", "ResolutionScale", "0.8")
+            // r35m: GL now runs the XR pacing thread; fill every display refresh with the newest
+            // game frame (the default paces to the game: ~57 XR frames/s on a 72 Hz display).
+            setIniValue(File(userDir, "Config/GFX.ini"), "VR", "EagerHeartbeat", "True")
         }
     }
 

@@ -44,10 +44,12 @@
              r35l (2026-10-15, public app, unworn A/B in a match): at 0 MR sits at GPU level 2
              (456 MHz) 85-97% busy, 56-59 fps / 95-97% speed, while the busiest CPU core averages
              53% (max 72%). Back to 1 now that the CPU side is lighter (Jumbotron only, no HD
-             texture pack lookups). Measured again before it ships. -->
+             texture pack lookups). Measured again before it ships.
+             r35m: back to 0. At 1 the measured MR gain was nothing (59.2 -> 59.0 fps, GPU 456 ->
+             492 MHz), and a lower CPU clock hurts an emulator in short bursts (GPT review). -->
         <meta-data
             android:name="com.oculus.trade_cpu_for_gpu_amount"
-            android:value="1" />
+            android:value="0" />
 
         <activity
             android:name=".activities.EmulationActivity"

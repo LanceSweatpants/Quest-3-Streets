@@ -59,6 +59,10 @@ namespace VR
 {
 std::unique_ptr<OpenXRManager> g_openxr;
 
+// StreetMR r35m: true on the XR pacing thread (FrameThreadLoop). GL work (the backdrop) must not
+// run there; EndFrameDetached checks this.
+static thread_local bool t_on_pacing_thread = false;
+
 namespace
 {
 const char* ReferenceSpaceTypeName(XrReferenceSpaceType type)
@@ -1287,9 +1291,36 @@ void OpenXRManager::PublishQuadFrame(const XrCompositionLayerQuad& quad)
   m_publish_cv.notify_all();
 }
 
+void OpenXRManager::PrepareBackdropOnRenderThread()
+{
+  if (m_swapchain == nullptr || !m_swapchain->BackdropNeedsRenderThread() ||
+      !IsFrameThreadActive())
+  {
+    return;
+  }
+  // Same choices as EndFrameDetached's own path, made here on the render thread.
+  const bool flat =
+      g_ActiveConfig.vr_flat_screen && g_ActiveConfig.stereo_mode != StereoMode::OpenXR;
+  const bool stadium = HitzModes::StadiumWanted();
+  const bool supported = SupportsCubeLayer() && m_swapchain->SupportsBackdrop();
+  std::lock_guard<std::mutex> lock(m_backdrop_mutex);
+  m_rt_backdrop_supported = supported;
+  m_rt_backdrop = XR_NULL_HANDLE;
+  m_rt_ambient_atlas = XR_NULL_HANDLE;
+  if (!supported || HitzWorld::Vr360Capture())
+    return;
+  m_swapchain->PollBackdrop();
+  if (stadium && (flat || g_ActiveConfig.VRPassthroughEnabled()))
+    m_rt_backdrop = m_swapchain->GetBackdropSwapchain(flat);
+  const std::string key = HitzWorld::CourtKey();
+  if (flat && key.rfind("streetmr_", 0) == 0 && key.rfind("streetmr_gradient_", 0) != 0)
+    m_rt_ambient_atlas = m_swapchain->GetAmbientAtlas();
+}
+
 void OpenXRManager::FrameThreadLoop()
 {
   Common::SetCurrentThreadName("OpenXR Pacing");
+  t_on_pacing_thread = true;  // r35m: see EndFrameDetached
 #if defined(ANDROID)
   // Meta's runtime applies big.LITTLE pinning / DVFS escalation to tagged threads.
   RegisterCurrentAndroidThread(AndroidThreadType::RendererWorker, "OpenXR Pacing");
@@ -1362,7 +1393,11 @@ void OpenXRManager::FrameThreadLoop()
 
   while (!m_frame_thread_should_exit.load(std::memory_order_acquire))
   {
-    const bool eager_heartbeat = g_ActiveConfig.vr_eager_heartbeat;
+    // StreetMR r35m/n: 1.2e's MR trouble (7-21 repeated frames/s, 81-98% speed) came with the
+    // pacing thread waiting on GPU fences, which 1.2g no longer does (PickReadyFlatSwapchain), so
+    // MR is eager again like VR. "tune mreager 0" (HitzWorld) brings back pacing to the game in MR.
+    const bool eager_heartbeat = g_ActiveConfig.vr_eager_heartbeat &&
+                                 (HitzModes::StadiumWanted() || HitzWorld::MrEagerHeartbeat());
     const u64 cycle_start_us = Common::Timer::NowUs();
     if (!PollEvents())
       break;
@@ -1561,8 +1596,12 @@ void OpenXRManager::FrameThreadLoop()
       float hz_now = 0.0f;
       if (m_xrGetDisplayRefreshRateFB != nullptr)
         m_xrGetDisplayRefreshRateFB(m_session, &hz_now);
-      HitzWorld::NoteDisplayStats(hz_now, stat_fresh, stat_repeat, stat_cycles,
-                                  (now_us - stats_start_us) / 1'000'000.0);
+      // r35n: plus content-less submits (the screen missing for a frame: see-through) and how the
+      // big screen's image was picked.
+      HitzWorld::NoteDisplayStats(
+          hz_now, stat_fresh, stat_repeat, stat_cycles, (now_us - stats_start_us) / 1'000'000.0,
+          fmt::format(" empty={}{}", stat_empty,
+                      m_swapchain ? m_swapchain->TakeFlatPickStats() : std::string()));
       const float wanted_hz = HitzWorld::DisplayRefreshWanted();
       if (wanted_hz > 0.0f && hz_now > 0.0f && std::abs(hz_now - wanted_hz) > 1.0f &&
           m_session_focused.load())
@@ -2481,6 +2520,15 @@ bool OpenXRManager::PollEvents()
       INFO_LOG_FMT(OPENXR, "OpenXR: Reference space change pending.");
       break;
 
+    case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB:
+    {
+      // StreetMR r35m (GPT review): the moment the headset actually switches rate.
+      const auto& ev = *reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB*>(&event);
+      NOTICE_LOG_FMT(OPENXR, "OpenXR: display refresh rate changed {} -> {} Hz",
+                     ev.fromDisplayRefreshRate, ev.toDisplayRefreshRate);
+      break;
+    }
+
     default:
       break;
     }
@@ -2817,7 +2865,9 @@ void OpenXRManager::AddAmbientLayers(XrTime display_time, float yaw, bool,
 {
   if (m_swapchain == nullptr)
     return;
-  const XrSwapchain atlas = m_swapchain->GetAmbientAtlas();
+  // r35m: on GL the atlas is made on the render thread (PrepareBackdropOnRenderThread).
+  const XrSwapchain atlas =
+      m_backdrop_from_render_thread ? m_rt_ambient_atlas : m_swapchain->GetAmbientAtlas();
   const double t = static_cast<double>(display_time) * 1e-9;
 
   // StreetMR r35 (Lance: "a vegas type basketball theme with flickering lights"): the plaza's
@@ -2935,15 +2985,30 @@ bool OpenXRManager::EndFrameDetached(XrTime display_time,
   // calm sky behind the table (HitzModes keeps the Passthrough setting on there, so the table's EFB
   // alpha lets it through). Plain sky until the court's pictures exist. No camera feed in VR.
   const bool stadium = HitzModes::StadiumWanted();
-  const bool backdrop_supported =
-      m_swapchain != nullptr && SupportsCubeLayer() && m_swapchain->SupportsBackdrop();
-  HitzWorld::SetBackdropSupported(backdrop_supported);
+  // StreetMR r35m: on the pacing thread with a backend whose backdrop needs the render thread
+  // (GL), the render thread already polled it (PrepareBackdropOnRenderThread); use its handles,
+  // and keep them alive (mutex) until xrEndFrame below has consumed them.
+  std::unique_lock<std::mutex> backdrop_lock;
+  m_backdrop_from_render_thread = m_swapchain != nullptr &&
+                                  m_swapchain->BackdropNeedsRenderThread() && t_on_pacing_thread;
   XrSwapchain backdrop = XR_NULL_HANDLE;
-  if (backdrop_supported && !HitzWorld::Vr360Capture())
+  if (m_backdrop_from_render_thread)
   {
-    m_swapchain->PollBackdrop();
-    if (stadium && (flat || g_ActiveConfig.VRPassthroughEnabled()))
-      backdrop = m_swapchain->GetBackdropSwapchain(flat);
+    backdrop_lock = std::unique_lock<std::mutex>(m_backdrop_mutex);
+    HitzWorld::SetBackdropSupported(m_rt_backdrop_supported);
+    backdrop = m_rt_backdrop;
+  }
+  else
+  {
+    const bool backdrop_supported =
+        m_swapchain != nullptr && SupportsCubeLayer() && m_swapchain->SupportsBackdrop();
+    HitzWorld::SetBackdropSupported(backdrop_supported);
+    if (backdrop_supported && !HitzWorld::Vr360Capture())
+    {
+      m_swapchain->PollBackdrop();
+      if (stadium && (flat || g_ActiveConfig.VRPassthroughEnabled()))
+        backdrop = m_swapchain->GetBackdropSwapchain(flat);
+    }
   }
   UpdateFBPassthrough(!stadium &&
                       ((g_ActiveConfig.VRPassthroughEnabled() && m_swapchain != nullptr) || flat_mr));
@@ -3005,6 +3070,30 @@ bool OpenXRManager::EndFrameDetached(XrTime display_time,
 
   XrResult end_result;
   {
+    // r35m: on the pacing thread, the images this frame shows must be finished on the GPU.
+    // Wait without the lock (the render thread keeps releasing), then hold it through
+    // xrEndFrame so no release slips in unwaited; one put down meanwhile gets a short wait.
+    // r35n: the big screen doesn't wait at all - the backend picks whichever of its two flat
+    // swapchains holds a finished image (newest first).
+    std::unique_lock<std::mutex> release_lock;
+    if (t_on_pacing_thread && m_swapchain)
+    {
+      m_swapchain->WaitForReleasedImages(false);
+      release_lock = m_swapchain->LockImageRelease();
+      m_swapchain->WaitForReleasedImages(true);
+      for (auto& layer : submit_layers)
+      {
+        if (layer->type != XR_TYPE_COMPOSITION_LAYER_QUAD)
+          continue;
+        const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+        const XrSwapchain pick = m_swapchain->PickReadyFlatSwapchain(quad->subImage.swapchain);
+        if (pick == quad->subImage.swapchain)
+          continue;
+        m_submit_quad = *quad;
+        m_submit_quad.subImage.swapchain = pick;
+        layer = reinterpret_cast<XrCompositionLayerBaseHeader*>(&m_submit_quad);
+      }
+    }
     std::unique_lock<std::mutex> queue_lock;
     if (lock_graphics_queue && m_swapchain)
       queue_lock = m_swapchain->AcquireGraphicsQueueLock();

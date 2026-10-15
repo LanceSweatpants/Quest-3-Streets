@@ -79,6 +79,7 @@ On that page, under **Assets**, get the file ending in **`.apk`** (not "Source c
 | **Left stick** | Move |
 | **A** | Pass / switch player |
 | **B** | Shoot on offense, block on defense |
+| **Both grips** (squeeze together) | **GAMEBREAKER** (when your Gamebreaker meter is full) |
 | **Right grip** (squeeze) | Trick / steal (the GameCube's X) |
 | **Left grip** (squeeze) | The GameCube's Z (extra trick button) |
 | **X** or **Y** (left controller) | The GameCube's Y |

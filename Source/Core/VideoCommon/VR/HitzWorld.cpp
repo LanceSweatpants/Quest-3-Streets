@@ -204,6 +204,7 @@ std::atomic<float> s_table_max_h{0.0f};      // "tablemaxh <m>": taller court st
 std::atomic<bool> s_flat_mr{true};           // "tune flatmr 0/1", see FlatPassthrough()
 std::atomic<u32> s_vr_sky{0};                // "tune vrsky <rgb>", see VRSkyColor()
 std::atomic<float> s_refresh{120.0f};        // "tune refresh <Hz>", see DisplayRefreshWanted()
+std::atomic<bool> s_mr_eager{true};          // "tune mreager 0/1", see MrEagerHeartbeat()
 std::atomic<int> s_table_ir{3};              // "tune tableir <n>", see TableInternalResolution()
 std::atomic<bool> s_table_fog{false};        // "tune tablefog 1" = the game's fog on the table too
 std::atomic<bool> s_table_shadows{false};    // "tune tableshadows 1" = shadows on the table (r29)
@@ -243,6 +244,7 @@ std::once_flag s_tuning_loaded;
 std::atomic<bool> s_force_screen_route{true};  // dev "tune screenroute 0/1"
 // Frames since the field was last drawn (a match is on while this stays small).
 u32 s_frames_since_court = 1000000;
+std::atomic<bool> s_match_on{false};  // r35n: InMatch() for other threads
 
 float Upm()
 {
@@ -1685,6 +1687,11 @@ bool InMatch()
   return s_frames_since_court < 120;
 }
 
+bool InMatchAnyThread()
+{
+  return s_match_on.load(std::memory_order_relaxed);
+}
+
 namespace
 {
 std::array<float, 6> s_last_persp_proj{};
@@ -2119,6 +2126,7 @@ void CommitFrame()
     s_field_streak = 0;
   }
   s_frames_since_court = saw_field ? 0 : s_frames_since_court + 1;
+  s_match_on.store(s_frames_since_court < 120, std::memory_order_relaxed);  // r35n, InMatchAnyThread
   UpdateBackdropKey();
   // Fifteen seconds without the field: back in the menus. Forget it (a new stadium may follow);
   // the same field again restores the old placements.
@@ -2420,6 +2428,8 @@ void SetTuning(const std::string& key, float value)
     s_texlist.store(value != 0.0f);
   else if (key == "refresh" && value >= 0.0f && value <= 144.0f)
     s_refresh.store(value);
+  else if (key == "mreager")
+    s_mr_eager.store(value != 0.0f);
   else if (key == "tableir" && value >= 0.0f && value <= 6.0f)
     s_table_ir.store(static_cast<int>(value));
   else if (key == "tablefog")
@@ -2445,7 +2455,8 @@ void SetTuning(const std::string& key, float value)
   }
   if (key != "screenroute" && key != "charscale" && key != "texsharp" && key != "gripgrab" &&
       key != "shadowfix" && key != "levelhead" && key != "flatgate" && key != "flatmr" &&
-      key != "vrsky" && key != "texlist" && key != "refresh" && key != "tableir" && key != "capyaw" &&
+      key != "vrsky" && key != "texlist" && key != "refresh" && key != "mreager" &&
+      key != "tableir" && key != "capyaw" &&
       key != "cappitch" && key != "capfov" && key != "tablefog" && key != "tableshadows" &&
       key != "tablebox" && key != "hudsize")
     s_reset_pending.store(true);
@@ -2526,19 +2537,25 @@ float DisplayRefreshWanted()
   return s_refresh.load(std::memory_order_relaxed);
 }
 
+bool MrEagerHeartbeat()
+{
+  return s_mr_eager.load(std::memory_order_relaxed);
+}
+
 namespace
 {
 std::mutex s_display_stats_mutex;
 std::string s_display_stats;
 }  // namespace
 
-void NoteDisplayStats(float hz, u32 fresh, u32 repeat, u32 cycles, double seconds)
+void NoteDisplayStats(float hz, u32 fresh, u32 repeat, u32 cycles, double seconds,
+                      const std::string& extra)
 {
   if (seconds <= 0.0)
     return;
   std::string text =
-      fmt::format(" hz={:.0f} shown={:.1f}/s repeated={:.1f}/s display={:.1f}/s", hz,
-                  fresh / seconds, repeat / seconds, cycles / seconds);
+      fmt::format(" hz={:.0f} shown={:.1f}/s repeated={:.1f}/s display={:.1f}/s{}", hz,
+                  fresh / seconds, repeat / seconds, cycles / seconds, extra);
   std::lock_guard lk(s_display_stats_mutex);
   s_display_stats = std::move(text);
 }

@@ -108,6 +108,24 @@ public:
   // current scene loaded as a static cube swapchain (r35j: Hoop City or a gradient, in every view;
   // the midnight gradient until one is up). XR_NULL_HANDLE = not on this backend.
   virtual bool SupportsBackdrop() const { return false; }
+  // StreetMR r35m: the backdrop's PollBackdrop / GetBackdropSwapchain / GetAmbientAtlas make
+  // graphics-API calls that must run on the render thread (GL: the thread owning the context).
+  // With the pacing thread on, OpenXRManager then runs them from the render thread
+  // (PrepareBackdropOnRenderThread) and the pacing thread only submits the result.
+  virtual bool BackdropNeedsRenderThread() const { return false; }
+  // StreetMR r35m: the pacing thread, right before xrEndFrame: no image release may slip in
+  // (the lock), and the GPU must have finished the most recently released images (GL: an EGL
+  // fence put down at each release - xrEndFrame from a thread without the GL context gives the
+  // runtime nothing to wait on, and the compositor showed half-drawn, still-black frames).
+  // `locked`: the caller holds LockImageRelease() (short wait for a last-moment release only).
+  virtual std::unique_lock<std::mutex> LockImageRelease() { return {}; }
+  virtual void WaitForReleasedImages(bool /*locked*/) {}
+  // StreetMR r35n: pacing thread, LockImageRelease() held, for a quad layer about to be ended:
+  // the swapchain to show instead (GL alternates the big screen between two swapchains and returns
+  // the one whose newest image the GPU has finished - never waiting). Default: unchanged.
+  virtual XrSwapchain PickReadyFlatSwapchain(XrSwapchain requested) { return requested; }
+  // r35n: counts since the last call, for the perf line (" pick=newest/older/waited/late").
+  virtual std::string TakeFlatPickStats() { return {}; }
   virtual void PollBackdrop() {}
   virtual XrSwapchain GetBackdropSwapchain(bool whole_court) { return XR_NULL_HANDLE; }
   // StreetMR r32 (Lance: the menu environment "alive ... moving objects"): r35j, just the
@@ -236,6 +254,10 @@ public:
   {
     return m_frame_thread_running.load(std::memory_order_acquire);
   }
+  // StreetMR r35m: render thread, once per present while the pacing thread is on, for backends
+  // whose backdrop needs the render thread (BackdropNeedsRenderThread): polls/loads the VR 360
+  // backdrop there and leaves the handles for the pacing thread's EndFrameDetached.
+  void PrepareBackdropOnRenderThread();
 
   // Hand the pacing thread a rendered stereo frame. The views (incl. the poses the
   // content was rendered with) are copied; swapchain handles inside must stay valid
@@ -618,6 +640,16 @@ private:
   // Adds them for the backdrop facing `yaw`; returns how many quads were filled.
   void AddAmbientLayers(XrTime display_time, float yaw, bool night,
                         std::vector<XrCompositionLayerBaseHeader*>* layers);
+  // StreetMR r35m: what PrepareBackdropOnRenderThread left for the pacing thread. The mutex is
+  // held by the render thread while it polls (it may create, fill or destroy cube swapchains) and
+  // by the pacing thread from reading these handles until its xrEndFrame has used them.
+  std::mutex m_backdrop_mutex;
+  XrSwapchain m_rt_backdrop = XR_NULL_HANDLE;
+  XrSwapchain m_rt_ambient_atlas = XR_NULL_HANDLE;
+  bool m_rt_backdrop_supported = false;
+  bool m_backdrop_from_render_thread = false;  // this EndFrameDetached uses the m_rt_* handles
+  // r35n: the big-screen quad as submitted when PickReadyFlatSwapchain chose the other swapchain.
+  XrCompositionLayerQuad m_submit_quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
 
 #if defined(ANDROID)
   PFN_xrVoidFunction m_xrSetAndroidApplicationThreadKHR = nullptr;

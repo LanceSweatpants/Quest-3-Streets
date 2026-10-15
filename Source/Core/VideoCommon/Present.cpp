@@ -1361,6 +1361,10 @@ void Presenter::Present(PresentInfo* present_info)
 #ifdef ENABLE_VR
   if (vr_frame_started)
   {
+    // StreetMR r35m: GL with the pacing thread - the VR 360 backdrop's GL work happens here, on
+    // the render thread (where the inline flow's EndFrame used to do it). No-op otherwise.
+    if (VR::g_openxr)
+      VR::g_openxr->PrepareBackdropOnRenderThread();
     if (!vr_skip_duplicate_publish)
     {
       // Pacing thread active: the eye blit was deferred from RenderXFBToScreen to here so
