@@ -586,10 +586,11 @@ void PollLoop()
       next_perf = Clock::now() + std::chrono::seconds(5);  // no catch-up burst after long batches
       std::string view;
 #ifdef ENABLE_VR
-      view = fmt::format(" view={} {} ptchanges={} backdrop={}",
+      view = fmt::format(" view={} {} ptchanges={} backdrop={}{}",
                          HitzWorld::ViewName(HitzWorld::GetView()),
                          HitzModes::StadiumWanted() ? "VR" : "MR",
-                         HitzModes::PassthroughSettingChanges(), HitzWorld::CourtKey());
+                         HitzModes::PassthroughSettingChanges(), HitzWorld::CourtKey(),
+                         HitzWorld::DisplayStatsText());
 #endif
       // r35i: online, how long the game waited for the other headset in these 5 s.
       const std::string online =

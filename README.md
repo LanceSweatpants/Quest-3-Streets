@@ -3,8 +3,7 @@
 <p align="center"><img src="docs/cover.jpg" width="340" alt="NBA Street Vol. 2 cover art"></p>
 
 NBA Street Vol. 2 (GameCube) on a Meta Quest 3: a giant screen floating in your room, or the same
-screen inside a Las Vegas–style basketball plaza in VR. It runs on the headset by itself, no PC
-needed to play.
+screen in VR. It runs on the headset by itself, no PC needed to play.
 
 Built on [DolphinXR](https://github.com/iChris4/DolphinXR), iChris4's Quest build of the
 [Dolphin](https://github.com/dolphin-emu/dolphin) emulator, with a layer made for this one game.
@@ -21,18 +20,13 @@ On that page, under **Assets**, get the file ending in **`.apk`** (not "Source c
 
 - **The big screen in your room (MR)**: the game on a giant screen floating in your real room. Grab
   it, move it, resize it, three preset sizes.
-- **The big screen in VR (the stadium)**: the same screen inside **Hoop City**, a Las Vegas–style
-  basketball plaza built for this app: a glossy neon-lit court, a giant glowing basketball dome, a
-  tower with a ball on top, casinos and hotels, palm trees and a big LED billboard. It's alive:
-  marquee bulbs chase round the signs, neon flickers, the billboard changes and searchlights sweep
-  the sky. Blue hour or night in the menus, night during the game.
-- **Or a plain gradient around you** instead of Hoop City: sunset, ocean, purple, midnight, mint,
-  fire or gray (**VR background** on the first screen).
+- **The big screen in VR**: the same screen with a color gradient all around you: midnight,
+  sunset, ocean, purple, mint, fire or gray (**VR background** on the first screen).
 - **One button for shooting and blocking**: B shoots when your team has the ball and blocks when the
   other team has it.
 
-**Coming soon:** online 1v1 with voice chat, and the tabletop mode (the court as a 3D miniature on
-your real table).
+**Coming soon:** online 1v1 with voice chat, a 3D stadium around you in VR, and the tabletop mode
+(the court as a 3D miniature on your real table).
 
 ## Status
 
@@ -98,7 +92,7 @@ your real table).
 
 | Do this | What happens |
 | --- | --- |
-| **Left stick: click twice fast** | Swap between **your room** (mixed reality) and **the stadium** (VR) |
+| **Left stick: click twice fast** | Swap between **your room** (mixed reality) and **VR** |
 | **Right stick: click once** | Next screen size |
 | **Left stick: click once** | Bring the screen back in front of you |
 | **Left grip** while pointing the left controller at the screen | Grab the screen and move it |
@@ -118,9 +112,9 @@ The screen's place is remembered, one for your room and one for VR.
 
 ## Known issues
 
-- **Online play and the tabletop mode aren't in this release yet.** They're coming.
-- **The courts' own surroundings in VR**: in VR every court is played inside the Hoop City plaza (or
-  your gradient). Pictures of the game's own courts can't be shared.
+- **Online play, the VR stadium and the tabletop mode aren't in this release yet.** They're coming.
+- **The headset stays at 72 Hz** while the game runs at 60 fps, so the picture isn't perfectly even.
+  The app asks the Quest for 120 Hz; the Quest hasn't granted it yet.
 
 ## Building from source
 
@@ -136,9 +130,8 @@ Where this project's code lives:
 
 - `Source/Core/VideoCommon/VR/HitzWorld.cpp`, `HitzModes.cpp`: the view modes, the screen, the VR
   backgrounds.
-- `Source/Core/VideoBackends/OGL/OGLOpenXR.cpp`: Hoop City and the gradients as cube layers.
-- `Tools/StreetMR-Vegas/`: the Blender script that builds and renders Hoop City, and its
-  post-processing.
+- `Source/Core/VideoBackends/OGL/OGLOpenXR.cpp`: the VR backgrounds as cube layers.
+- `Tools/StreetMR-Vegas/`: Blender scripts for a VR stadium (work in progress, not in releases).
 - `Source/Core/Core/HitzDev.cpp`: the shoot / block button.
 - `Source/Android/app/.../street/`: the start screen and the game file picker.
 - `Source/Android/jni/StreetOnline.cpp`, `StreetVoice.cpp`: online play and voice chat (in progress,
@@ -149,7 +142,7 @@ Where this project's code lives:
 - The [Dolphin](https://dolphin-emu.org) team: the emulator.
 - [iChris4](https://github.com/iChris4): DolphinXR, the OpenXR / Quest build of Dolphin this is
   built on.
-- Quest port, view modes and Hoop City: [LanceSweatpants](https://github.com/LanceSweatpants).
+- Quest port and view modes: [LanceSweatpants](https://github.com/LanceSweatpants).
 
 ## License
 

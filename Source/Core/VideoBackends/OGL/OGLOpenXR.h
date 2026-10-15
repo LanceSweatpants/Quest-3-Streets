@@ -163,13 +163,17 @@ private:
   bool m_ambient_tried = false;
   void LoadAmbient();
   // StreetMR r35: the pre-match scenes' light groups (kept per key, like the scenes): decoded off
-  // the video thread, then one cube uploaded per frame.
+  // the video thread, then (r35k) filled a few rows per frame, one cube after the other.
   using LightCubes = std::array<XrSwapchain, 6>;
   std::map<std::string, LightCubes> m_backdrop_lights;
   std::set<std::string> m_backdrop_lights_tried;
   std::string m_lights_key;  // the key being decoded / uploaded
   std::future<std::array<std::optional<Panorama>, 6>> m_lights_load;
   std::array<std::optional<Panorama>, 6> m_lights_pending;
+  size_t m_lights_fill_group = 0;  // the group being filled
+  XrSwapchain m_lights_filling = XR_NULL_HANDLE;
+  u32 m_lights_fill_image = 0;
+  u32 m_lights_fill_rows = 0;  // rows filled so far, over all six faces
   void PollBackdropLights();
 
   // Non-owning; the context is owned by OGLGfx and outlives this object.

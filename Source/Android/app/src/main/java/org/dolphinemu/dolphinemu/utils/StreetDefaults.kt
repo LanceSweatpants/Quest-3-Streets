@@ -3,6 +3,7 @@
 package org.dolphinemu.dolphinemu.utils
 
 import android.content.Context
+import org.dolphinemu.dolphinemu.BuildConfig
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -41,6 +42,67 @@ object StreetDefaults {
         }
         installFile(context, "$ROOT/street_tuning.txt", File(userDir, "street_tuning.txt"), null)
         installFolder(context, "$ROOT/StreetVR360", File(userDir, "Load/StreetVR360"), true, null)
+        removeRetiredScenery(context, File(userDir, "Load/StreetVR360"))
+        if (BuildConfig.STREET_PUBLIC) {
+            // r35l (Lance: max fps): no HD texture pack ships, so looking one up for every texture
+            // the game loads is only CPU time. Also fixes headsets that got the earlier GFX.ini.
+            setIniValue(File(userDir, "Config/GFX.ini"), "Settings", "HiresTextures", "False")
+        }
+    }
+
+    /** Sets [key] = [value] in [section] of an ini file, adding the section or key when missing. */
+    private fun setIniValue(file: File, section: String, key: String, value: String) {
+        val lines = if (file.exists()) file.readLines().toMutableList() else mutableListOf()
+        val header = "[$section]"
+        var start = lines.indexOfFirst { it.trim().equals(header, ignoreCase = true) }
+        if (start < 0) {
+            lines.add(header)
+            start = lines.size - 1
+        }
+        var end = start + 1
+        while (end < lines.size && !lines[end].trim().startsWith("[")) {
+            end++
+        }
+        val wanted = "$key = $value"
+        val at = (start + 1 until end).firstOrNull {
+            lines[it].substringBefore('=').trim().equals(key, ignoreCase = true)
+        }
+        if (at != null) {
+            if (lines[at].trim() == wanted) {
+                return
+            }
+            lines[at] = wanted
+        } else {
+            lines.add(end, wanted)
+        }
+        try {
+            file.parentFile?.mkdirs()
+            file.writeText(lines.joinToString("\n", postfix = "\n"))
+            Log.info("$TAG $section/$key set to $value in ${file.name}")
+        } catch (e: IOException) {
+            Log.error("$TAG Couldn't update ${file.name}: ${e.message}")
+        }
+    }
+
+    /**
+     * r35l (Lance: "delete the whole damn blender render"): the app's own scenery pictures
+     * ("streetmr_*") that this release no longer bundles (Hoop City, the old rooftop's sprites and
+     * clouds) are deleted from the headset. Other pictures in the folder are left alone.
+     */
+    private fun removeRetiredScenery(context: Context, folder: File) {
+        val bundled = try {
+            context.assets.list("$ROOT/StreetVR360")?.toSet() ?: emptySet()
+        } catch (e: IOException) {
+            return
+        }
+        val files = folder.listFiles() ?: return
+        for (f in files) {
+            if (f.isFile && f.name.startsWith("streetmr_") && f.name !in bundled) {
+                if (f.delete()) {
+                    Log.info("$TAG Removed retired scenery ${f.name}")
+                }
+            }
+        }
     }
 
     private fun installFolder(

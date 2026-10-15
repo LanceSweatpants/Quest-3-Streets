@@ -247,6 +247,10 @@ bool IsRecentEfbCopyTarget(u32 address);
 // OpenXRManager asks for. The game runs at 60: at 72 Hz a frame repeated 13-17 times a second;
 // at 120 Hz every frame shows exactly twice.
 float DisplayRefreshWanted();
+// r35l: the XR pacing thread's last 5 s - display rate in use, game frames shown (fresh) and
+// display frames that showed a game frame again (repeat) - and the perf line's text for them.
+void NoteDisplayStats(float hz, u32 fresh, u32 repeat, u32 cycles, double seconds);
+std::string DisplayStatsText();
 
 // Jumbotron: send every (non render-to-texture) draw to the fork's virtual screen.
 bool ForceScreenRoute();

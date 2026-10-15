@@ -1554,6 +1554,21 @@ void OpenXRManager::FrameThreadLoop()
                    stat_repeat, stat_empty, stat_wait_ms / stat_cycles,
                    stat_content_wait_ms / stat_cycles, stat_end_ms / stat_cycles,
                    stat_handoff_waited);
+      // StreetMR r35l (Lance: "laggy a bit" in both views): the display rate in use and how many
+      // displayed frames were a game frame shown again, for the perf line (street_perf.txt). While
+      // the rate isn't the one asked for, ask again: every unworn test so far got "ok" and stayed
+      // at 72 Hz (60 game frames on 72 Hz = 12 repeats a second = judder).
+      float hz_now = 0.0f;
+      if (m_xrGetDisplayRefreshRateFB != nullptr)
+        m_xrGetDisplayRefreshRateFB(m_session, &hz_now);
+      HitzWorld::NoteDisplayStats(hz_now, stat_fresh, stat_repeat, stat_cycles,
+                                  (now_us - stats_start_us) / 1'000'000.0);
+      const float wanted_hz = HitzWorld::DisplayRefreshWanted();
+      if (wanted_hz > 0.0f && hz_now > 0.0f && std::abs(hz_now - wanted_hz) > 1.0f &&
+          m_session_focused.load())
+      {
+        m_refresh_requested_for = -1.0f;  // UpdateDisplayRefreshRate asks again next WaitFrame
+      }
       stats_start_us = now_us;
       stat_cycles = stat_fresh = stat_repeat = stat_empty = 0;
       stat_handoff_waited = 0;

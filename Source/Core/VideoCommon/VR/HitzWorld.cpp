@@ -1690,7 +1690,7 @@ namespace
 std::array<float, 6> s_last_persp_proj{};
 
 std::mutex s_style_mutex;
-std::string s_backdrop_style = "vegas";
+std::string s_backdrop_style = "midnight";
 
 std::string GetBackdropStyle()
 {
@@ -1732,11 +1732,14 @@ void UpdateBackdropKey()
     }
     court_picture = it->second;
   }
-  // r35c: the start screen's VR background: Hoop City (night / blue hour) or one plain gradient.
-  const std::string style = GetBackdropStyle();
-  const bool vegas = style.empty() || style == "vegas";
-  const std::string night = vegas ? "streetmr_loading" : "streetmr_gradient_" + style;
-  const std::string day = vegas ? "streetmr_menu" : night;
+  // r35c: the start screen's VR background, one plain gradient. r35l (Lance: "delete the whole damn
+  // blender render we'll try again tomorrow"): Hoop City is gone; an old "vegas" choice gets the
+  // midnight gradient.
+  std::string style = GetBackdropStyle();
+  if (style.empty() || style == "vegas")
+    style = "midnight";
+  const std::string night = "streetmr_gradient_" + style;
+  const std::string day = night;
   const std::string want = in_match && court_picture ? s_court_key_vt :
                            in_match                  ? night :
                            s_night_visit             ? night :
@@ -2521,6 +2524,29 @@ float DevLevelHead()
 float DisplayRefreshWanted()
 {
   return s_refresh.load(std::memory_order_relaxed);
+}
+
+namespace
+{
+std::mutex s_display_stats_mutex;
+std::string s_display_stats;
+}  // namespace
+
+void NoteDisplayStats(float hz, u32 fresh, u32 repeat, u32 cycles, double seconds)
+{
+  if (seconds <= 0.0)
+    return;
+  std::string text =
+      fmt::format(" hz={:.0f} shown={:.1f}/s repeated={:.1f}/s display={:.1f}/s", hz,
+                  fresh / seconds, repeat / seconds, cycles / seconds);
+  std::lock_guard lk(s_display_stats_mutex);
+  s_display_stats = std::move(text);
+}
+
+std::string DisplayStatsText()
+{
+  std::lock_guard lk(s_display_stats_mutex);
+  return s_display_stats;
 }
 
 bool IsCourtFloorDraw()

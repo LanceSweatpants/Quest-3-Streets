@@ -37,6 +37,10 @@
 #include <string_view>
 #include <vector>
 
+#if defined(ANDROID) || defined(__linux__)
+#include <sys/resource.h>
+#endif
+
 #include "Common/Assert.h"
 #include "Common/Buffer.h"
 #include "Common/FileUtil.h"
@@ -643,6 +647,16 @@ bool OGLOpenXR::SubmitFrame()
 
 namespace
 {
+// r35k (Lance: "laggy as shiiit in VR mode"): decoding the VR pictures is background work, below
+// the emulator's threads, so a scene loading never takes CPU time from the game. (On Linux and
+// Android the nice value is per thread: who = 0 is the calling thread.)
+void LowerDecodePriority()
+{
+#if defined(ANDROID) || defined(__linux__)
+  setpriority(PRIO_PROCESS, 0, 10);
+#endif
+}
+
 std::optional<OGLOpenXR::Panorama> DecodePanorama(const std::string& path)
 {
   std::string file;
@@ -881,6 +895,11 @@ void OGLOpenXR::DestroyBackdrops()
   m_lights_load = {};
   m_lights_pending = {};
   m_lights_key.clear();
+  if (m_lights_filling != XR_NULL_HANDLE)
+    xrDestroySwapchain(m_lights_filling);
+  m_lights_filling = XR_NULL_HANDLE;
+  m_lights_fill_group = 0;
+  m_lights_fill_rows = 0;
   for (auto& [key, cubes] : m_backdrop_lights)
   {
     for (XrSwapchain sc : cubes)
@@ -956,6 +975,7 @@ void OGLOpenXR::PollBackdrop()
     else if (!key.empty() && (File::Exists(base + ".png") || File::Exists(base + "_sky.png")))
     {
       m_backdrop_load = std::async(std::launch::async, [base] {
+        LowerDecodePriority();
         CourtPictures p;
         if (File::Exists(base + "_sky.png"))
           p.sky = DecodePanorama(base + "_sky.png");
@@ -1090,55 +1110,65 @@ void OGLOpenXR::LoadAmbient()
 
 void OGLOpenXR::PollBackdropLights()
 {
-  // Decoded: one cube a frame to the GPU (6 x 768^2 texels, a few ms), no hitch.
+  // Decoded: to the GPU a quarter-million pixels (1 MB) a frame, like the scene itself. r35k: a
+  // whole cube in one frame (6 x 1024^2 texels, 25 MB) stalled the VR frame loop for a moment six
+  // times per scene - the judder Lance saw ("laggy as shiiit in VR mode") whenever one loaded.
   if (!m_lights_key.empty() && !m_lights_load.valid())
   {
     LightCubes& cubes = m_backdrop_lights[m_lights_key];
-    for (size_t i = 0; i < m_lights_pending.size(); ++i)
+    while (m_lights_fill_group < m_lights_pending.size())
     {
+      const size_t i = m_lights_fill_group;
       if (!m_lights_pending[i])
-        continue;
-      Panorama& p = *m_lights_pending[i];
-      // Light only: the compositor adds it (premultiplied colour, alpha 0).
-      for (size_t k = 3; k < p.rgba.size(); k += 4)
-        p.rgba[k] = 0;
-      u32 image = 0;
-      cubes[i] = CreateCubeSwapchain(p.face, &image);
-      if (cubes[i] != XR_NULL_HANDLE)
       {
-        UploadCubeFaces(image, p.rgba.data(), p.face, 0, 6);
-        FinishCubeSwapchain(cubes[i]);
+        ++m_lights_fill_group;
+        continue;
       }
-      m_lights_pending[i].reset();
+      const Panorama& p = *m_lights_pending[i];
+      const u32 face = p.face;
+      if (m_lights_filling == XR_NULL_HANDLE)
+      {
+        m_lights_filling = CreateCubeSwapchain(face, &m_lights_fill_image);
+        m_lights_fill_rows = 0;
+        if (m_lights_filling == XR_NULL_HANDLE)
+        {
+          m_lights_pending[i].reset();
+          ++m_lights_fill_group;
+          return;
+        }
+      }
+      const u32 rows = std::max<u32>(1, (256u * 1024u) / face);
+      const u32 face_index = m_lights_fill_rows / face, row0 = m_lights_fill_rows % face;
+      const u32 count = std::min(rows, face - row0);
+      UploadCubeFaces(m_lights_fill_image, p.rgba.data(), face, face_index, face_index + 1, row0,
+                      count);
+      m_lights_fill_rows += count;
+      if (m_lights_fill_rows >= 6 * face)
+      {
+        FinishCubeSwapchain(m_lights_filling);
+        cubes[i] = m_lights_filling;
+        m_lights_filling = XR_NULL_HANDLE;
+        m_lights_pending[i].reset();
+        ++m_lights_fill_group;
+      }
       return;
     }
     NOTICE_LOG_FMT(VIDEO, "VR 360: light groups of {} ready", m_lights_key);
     m_lights_key.clear();
+    m_lights_fill_group = 0;
   }
   if (m_lights_load.valid())
   {
     if (m_lights_load.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+    {
       m_lights_pending = m_lights_load.get();
+      m_lights_fill_group = 0;
+    }
     return;
   }
-  // Only the scene on show keeps its light groups (2K scenes, r35c: ~24 MB a group); another
-  // scene's go, and load again on its next visit.
+  // r35k: both Hoop City scenes keep their light groups once loaded (6 x 25 MB each). Dropping
+  // the other scene's made every menu <-> game switch decode and upload all of them again.
   const std::string& key = m_backdrop_key;
-  for (auto it = m_backdrop_lights.begin(); it != m_backdrop_lights.end();)
-  {
-    if (it->first == key)
-    {
-      ++it;
-      continue;
-    }
-    for (XrSwapchain sc : it->second)
-    {
-      if (sc != XR_NULL_HANDLE)
-        xrDestroySwapchain(sc);
-    }
-    m_backdrop_lights_tried.erase(it->first);
-    it = m_backdrop_lights.erase(it);
-  }
   // A pre-match scene with light groups not loaded yet: decode them off this thread.
   if (key.rfind("streetmr_", 0) != 0 || m_backdrop_lights.contains(key) ||
       m_backdrop_lights_tried.contains(key))
@@ -1151,9 +1181,19 @@ void OGLOpenXR::PollBackdropLights()
     return;
   m_lights_key = key;
   m_lights_load = std::async(std::launch::async, [base] {
+    LowerDecodePriority();
     std::array<std::optional<Panorama>, 6> out;
     for (size_t i = 0; i < out.size(); ++i)
+    {
       out[i] = DecodePanorama(base + std::to_string(i + 1) + ".png");
+      // Light only: the compositor adds it (premultiplied colour, alpha 0). Done here, off the
+      // frame loop.
+      if (out[i])
+      {
+        for (size_t k = 3; k < out[i]->rgba.size(); k += 4)
+          out[i]->rgba[k] = 0;
+      }
+    }
     return out;
   });
   NOTICE_LOG_FMT(VIDEO, "VR 360: loading the light groups of {}", key);

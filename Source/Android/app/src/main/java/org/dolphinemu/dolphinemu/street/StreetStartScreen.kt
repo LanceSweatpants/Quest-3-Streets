@@ -247,7 +247,12 @@ class StreetStartScreen(private val activity: FragmentActivity) : DefaultLifecyc
         show(ui)
     }
 
-    private fun savedBackdrop(): String = prefs().getString(PREF_BACKDROP, "vegas") ?: "vegas"
+    // r35l (Lance: the Blender scene is gone until it's redone): gradients only; an old "vegas"
+    // choice becomes midnight.
+    private fun savedBackdrop(): String {
+        val saved = prefs().getString(PREF_BACKDROP, DEFAULT_BACKDROP) ?: DEFAULT_BACKDROP
+        return if (BACKDROPS.any { it.first == saved }) saved else DEFAULT_BACKDROP
+    }
 
     /** Tells the native side (it keeps it for the game's VR background). */
     private fun applyBackdrop() {
@@ -671,15 +676,15 @@ class StreetStartScreen(private val activity: FragmentActivity) : DefaultLifecyc
         private const val CODE_LENGTH = 8
         private val CODE_PATTERN = Regex("^[0-9a-f]{8}$")
         private const val PREF_BACKDROP = "streetBackdrop"
+        private const val DEFAULT_BACKDROP = "midnight"
 
         // r35c (Lance: plain gradients for people who don't want the Vegas scenery). Keys match
         // OGLOpenXR's MakeGradientCube palettes.
         private val BACKDROPS = listOf(
-            "vegas" to "Hoop City (Las Vegas)",
+            "midnight" to "Midnight gradient",
             "sunset" to "Sunset gradient",
             "ocean" to "Ocean gradient",
             "purple" to "Purple gradient",
-            "midnight" to "Midnight gradient",
             "mint" to "Mint gradient",
             "fire" to "Fire gradient",
             "gray" to "Gray gradient",
