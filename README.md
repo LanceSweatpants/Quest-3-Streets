@@ -1,5 +1,7 @@
 # Quest 3 Streets
 
+<p align="center"><img src="docs/cover.jpg" width="340" alt="NBA Street Vol. 2 cover art"></p>
+
 NBA Street Vol. 2 (GameCube) on a Meta Quest 3: a giant screen floating in your room, or the same
 screen inside a Las Vegas–style basketball plaza in VR. It runs on the headset by itself, no PC
 needed to play.
